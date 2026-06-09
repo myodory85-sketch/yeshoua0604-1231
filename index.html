@@ -925,6 +925,14 @@ body{font-family:var(--font);background:#EEF2F7;color:var(--g900)}
       <button class="btn-ghost" onclick="exportCSV()">📊 CSV로 내보내기</button>
       <button class="btn-ghost" onclick="exportJSON()">🗂️ JSON으로 내보내기</button>
       <button class="btn-ghost" onclick="openModal('cfg-modal')">☁️ 구글 시트 설정</button>
+      <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--g100)">
+        <div style="font-size:12px;font-weight:700;color:var(--g700);margin-bottom:6px">📥 데이터 가져오기</div>
+        <div style="font-size:11px;color:var(--g500);margin-bottom:8px;line-height:1.6">다른 기기에서 내보낸 JSON 파일을 불러오거나,<br>구글 시트에 저장된 데이터를 이 기기로 가져옵니다.</div>
+        <label style="display:block;width:100%;background:#fff;border:1.5px dashed var(--g300);border-radius:var(--rsm);padding:11px;font-size:13px;font-family:var(--font);color:var(--g600);cursor:pointer;text-align:center;font-weight:700;margin-bottom:8px;box-sizing:border-box" onclick="document.getElementById('import-file').click()">📂 JSON 파일 불러오기</label>
+        <input type="file" id="import-file" accept=".json" style="display:none" onchange="importJSON(event)">
+        <button class="btn-ghost" onclick="importFromSheet()">☁️ 구글 시트에서 불러오기</button>
+        <div id="import-result" style="display:none;margin-top:8px;padding:9px 12px;border-radius:var(--rsm);font-size:12px;line-height:1.6"></div>
+      </div>
     </div>
   </div>
   <div style="height:20px"></div>
@@ -1855,6 +1863,115 @@ function shareApp(){
   URL.revokeObjectURL(a.href);
   toast('📤 공유용 파일 저장 완료! 카톡·메일로 공유하세요.');
 }
+// ════════════════════════════════════
+// IMPORT — JSON 파일 불러오기
+// ════════════════════════════════════
+function importJSON(event){
+  const file = event.target.files[0];
+  if(!file){ return; }
+  const reader = new FileReader();
+  reader.onload = function(e){
+    try{
+      const imported = JSON.parse(e.target.result);
+      if(!Array.isArray(imported)){ toast('⚠️ 올바른 JSON 형식이 아닙니다'); return; }
+
+      // 기존 데이터와 병합 (id 기준 중복 제거)
+      const existingIds = new Set(recs.map(r => r.id));
+      const newRecs = imported.filter(r => !existingIds.has(r.id));
+      const merged = [...recs, ...newRecs];
+
+      // 날짜 최신순 정렬
+      merged.sort((a,b) => new Date(b.savedAt||0) - new Date(a.savedAt||0));
+
+      recs = merged;
+      localStorage.setItem('pm_recs', JSON.stringify(recs));
+      refreshHistory();
+
+      const result = document.getElementById('import-result');
+      result.style.display = 'block';
+      result.style.background = 'var(--ok-l)';
+      result.style.color = 'var(--ok)';
+      result.style.border = '1px solid var(--ok-m)';
+      result.innerHTML = '✅ 불러오기 완료!<br>전체 ' + imported.length + '건 중 새 데이터 ' + newRecs.length + '건 추가됨<br>(중복 ' + (imported.length - newRecs.length) + '건 건너뜀)';
+      toast('✅ JSON 불러오기 완료! ' + newRecs.length + '건 추가');
+    } catch(err){
+      toast('⚠️ 파일을 읽는 중 오류: ' + err.message);
+    }
+    // 파일 input 초기화 (같은 파일 재선택 가능하게)
+    event.target.value = '';
+  };
+  reader.readAsText(file, 'utf-8');
+}
+
+// ════════════════════════════════════
+// IMPORT — 구글 시트에서 불러오기
+// ════════════════════════════════════
+async function importFromSheet(){
+  if(!cfg.url){ toast('⚠️ 구글 시트 URL을 먼저 설정해주세요'); return; }
+
+  const result = document.getElementById('import-result');
+  result.style.display = 'block';
+  result.style.background = 'var(--pri-l)';
+  result.style.color = 'var(--pri)';
+  result.style.border = '1px solid var(--pri-m)';
+  result.innerHTML = '⏳ 구글 시트에서 데이터를 가져오는 중...';
+
+  const types = ['체크리스트', '현장조사', '만족도'];
+  let totalNew = 0;
+  let errors = [];
+
+  for(const type of types){
+    try{
+      const url = cfg.url + '?type=' + encodeURIComponent(type) + '&limit=500';
+      const res = await fetch(url);
+      if(!res.ok) throw new Error('HTTP ' + res.status);
+      const json = await res.json();
+      const rows = json.data || [];
+
+      // 시트 데이터를 recs 형식으로 변환
+      const existingIds = new Set(recs.map(r => String(r.id)));
+      rows.forEach(row => {
+        const sheetId = String(row['타임스탬프'] || '') + '_' + String(row['이용인'] || row['참여이용인'] || '') + '_' + type;
+        if(!existingIds.has(sheetId)){
+          const rec = {
+            id: sheetId,
+            type: type,
+            savedAt: row['기록일시'] || row['타임스탬프'] || new Date().toISOString(),
+            session: parseInt(row['회차']) || 0,
+            user: row['이용인'] || row['참여이용인'] || '',
+            place: row['장소'] || row['장소명'] || '',
+            district: row['자치구'] || '',
+            date: row['날짜'] || row['조사날짜'] || '',
+            payload: row
+          };
+          recs.push(rec);
+          existingIds.add(sheetId);
+          totalNew++;
+        }
+      });
+    } catch(err){
+      errors.push(type + ': ' + err.message);
+    }
+  }
+
+  recs.sort((a,b) => new Date(b.savedAt||0) - new Date(a.savedAt||0));
+  localStorage.setItem('pm_recs', JSON.stringify(recs));
+  refreshHistory();
+
+  if(errors.length){
+    result.style.background = 'var(--warn-l)';
+    result.style.color = 'var(--warn)';
+    result.style.border = '1px solid var(--warn-m)';
+    result.innerHTML = '⚠️ 일부 불러오기 완료 (' + totalNew + '건 추가)<br>오류: ' + errors.join(', ') + '<br><small>no-cors 제한으로 구글 시트 직접 조회가 안 될 수 있습니다.<br>아래 JSON 내보내기 방법을 이용해 주세요.</small>';
+  } else {
+    result.style.background = 'var(--ok-l)';
+    result.style.color = 'var(--ok)';
+    result.style.border = '1px solid var(--ok-m)';
+    result.innerHTML = '✅ 구글 시트에서 ' + totalNew + '건 불러오기 완료!<br>기존 데이터와 병합되었습니다.';
+    toast('✅ 시트에서 ' + totalNew + '건 불러옴');
+  }
+}
+
 function clearAll(){
   if(!confirm('모든 로컬 데이터를 삭제할까요? 되돌릴 수 없습니다.')) return;
   recs=[];localStorage.removeItem('pm_recs');
